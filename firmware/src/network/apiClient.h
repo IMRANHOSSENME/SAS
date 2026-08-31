@@ -6,27 +6,45 @@
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
 
-struct DeviceTask {
-    bool pending;
-    String action; // ENROLL, DELETE
-    String userId;
-    String sensorType;
-    int fingerprintId; // for DELETE action
+/**
+ * Represents the command received from the server via heartbeat.
+ * mode: "LISTENING" = normal scan mode
+ *       "ENROLL"    = enrollment mode, scan and post result
+ *       "UPDATE"    = update fingerprint, scan and post result
+ */
+struct PendingCommand {
+    bool hasCommand;
+    String mode;         // LISTENING | ENROLL | UPDATE
+    String operationId;  // BiometricJob ID (when mode == ENROLL or UPDATE)
 };
 
 class ApiClient {
 private:
     static String getMacAddress();
-    static String getDeviceSecret();
     static String apiUrl;
 
 public:
     static void init(String url);
-    static bool sendHeartbeat(bool fingerprintActive, DeviceTask& task);
-    static bool sendEnrollmentResult(String userId, int fingerprintId, String sensorType);
-    static void sendEnrollmentStatus(String status, String message);
+
+    /**
+     * Send periodic heartbeat to server.
+     * Returns parsed pendingCommand so the device can change mode.
+     */
+    static PendingCommand sendHeartbeat(bool fingerprintActive);
+
+    /**
+     * Post fingerprint scan result for a BiometricJob.
+     * Called after successful enrollment scan.
+     * @param jobId   The operationId from pendingCommand
+     * @param fingerprintId  The slot ID on the R307 sensor
+     */
+    static bool sendJobResult(String jobId, int fingerprintId);
+
+    /**
+     * Send attendance scan result to server.
+     * Returns raw JSON response string.
+     */
     static String sendAttendanceScan(int fingerprintId);
-    static bool sendSyncResult(int* ids, int count);
 };
 
 #endif // API_CLIENT_H

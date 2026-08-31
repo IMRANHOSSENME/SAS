@@ -1,160 +1,158 @@
 #include "ApiClient.h"
+#include "../config/deviceConfig.h"
 #include <ArduinoJson.h>
 
 String ApiClient::apiUrl = "";
 
 void ApiClient::init(String url) {
     apiUrl = url;
-    Serial.println("ApiClient initialized. URL: " + apiUrl);
-    Serial.println("Device MAC (UID): " + getMacAddress());
+    Serial.println("[ApiClient] Initialized. Base URL: " + apiUrl);
+    Serial.println("[ApiClient] Device MAC (UID): " + getMacAddress());
 }
 
 String ApiClient::getMacAddress() {
     return WiFi.macAddress();
 }
 
-String ApiClient::getDeviceSecret() {
-    return "secret123";
-}
+// ─── Heartbeat ────────────────────────────────────────────────────────────────
+// Sends device telemetry every HEARTBEAT_INTERVAL_MS.
+// Server responds with pendingCommand to tell device what mode to operate in:
+//   mode = "LISTENING" → normal scan mode (default)
+//   mode = "ENROLL"    → enrollment mode, operationId = biometricJob ID
+//   mode = "UPDATE"    → update fingerprint, operationId = biometricJob ID
+PendingCommand ApiClient::sendHeartbeat(bool fingerprintActive) {
+    PendingCommand result;
+    result.hasCommand = false;
+    result.mode = "LISTENING";
+    result.operationId = "";
 
-bool ApiClient::sendHeartbeat(bool fingerprintActive, DeviceTask& task) {
-    task.pending = false;
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Cannot send heartbeat: WiFi disconnected.");
-        return false;
+        Serial.println("[Heartbeat] WiFi disconnected, skipping.");
+        return result;
     }
 
     WiFiClient client;
     HTTPClient http;
-    
+
     String endpoint = apiUrl + "/devices/heartbeat";
     http.begin(client, endpoint);
-    
     http.addHeader("Content-Type", "application/json");
     http.addHeader("x-device-uid", getMacAddress());
-    http.addHeader("x-device-secret", getDeviceSecret());
-    
+    http.addHeader("x-device-secret", DEVICE_SECRET);
+
     long uptime = millis() / 1000;
-    long rssi = WiFi.RSSI();
-    
+    long rssi   = WiFi.RSSI();
+
+    // Build JSON payload
     String payload = "{";
-    payload += "\"status\":\"ACTIVE\",";
-    payload += "\"uptime\":" + String(uptime) + ",";
-    payload += "\"wifiRssi\":" + String(rssi) + ",";
-    payload += "\"firmwareVersion\":\"v0.2.0\",";
+    payload += "\"uptime\":"          + String(uptime) + ",";
+    payload += "\"wifiRssi\":"        + String(rssi)   + ",";
+    payload += "\"firmwareVersion\":\"" FIRMWARE_VERSION "\",";
     payload += "\"activeSensors\":[";
-    if (fingerprintActive) {
-        payload += "\"FINGERPRINT\"";
-    }
-    payload += "]";
-    payload += "}";
-    
-    int httpResponseCode = http.POST(payload);
-    
-    bool success = false;
-    if (httpResponseCode > 0) {
-        if (httpResponseCode == 200 || httpResponseCode == 201) {
-            Serial.println("Heartbeat sent successfully.");
-            String response = http.getString();
-            
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, response);
-            if (!error) {
-                if (doc["deviceTask"]) {
-                    task.pending = true;
-                    task.action = doc["deviceTask"]["action"].as<String>();
-                    if (task.action == "ENROLL") {
-                        task.sensorType = doc["deviceTask"]["sensorType"].as<String>();
-                        task.userId = doc["deviceTask"]["userId"].as<String>();
-                        Serial.println("Received ENROLL Task for User: " + task.userId);
-                    } else if (task.action == "DELETE") {
-                        task.fingerprintId = doc["deviceTask"]["fingerprintId"].as<int>();
-                        Serial.println("Received DELETE Task for Fingerprint ID: " + String(task.fingerprintId));
-                    }
-                }
+    if (fingerprintActive) payload += "\"FINGERPRINT\"";
+    payload += "]}";
+
+    int code = http.POST(payload);
+
+    if (code == 200 || code == 201) {
+        String body = http.getString();
+        Serial.println("[Heartbeat] OK. Response: " + body);
+
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, body);
+        if (!err && doc["pendingCommand"]) {
+            String mode = doc["pendingCommand"]["mode"].as<String>();
+            result.mode       = mode;
+            result.operationId = doc["pendingCommand"]["operationId"] | "";
+            result.hasCommand  = (mode != "LISTENING");
+
+            if (result.hasCommand) {
+                Serial.println("[Heartbeat] PendingCommand: mode=" + mode + " opId=" + result.operationId);
             }
-            
-            success = true;
-        } else {
-            Serial.print("Heartbeat failed, code: ");
-            Serial.println(httpResponseCode);
-            String response = http.getString();
-            Serial.println(response);
         }
     } else {
-        Serial.print("Error sending heartbeat: ");
-        Serial.println(http.errorToString(httpResponseCode).c_str());
+        Serial.printf("[Heartbeat] Failed, HTTP %d\n", code);
     }
-    
+
     http.end();
-    return success;
+    return result;
 }
 
-bool ApiClient::sendEnrollmentResult(String userId, int fingerprintId, String sensorType) {
+// ─── Biometric Job Result ─────────────────────────────────────────────────────
+// After the R307 sensor scans a finger during ENROLL/UPDATE mode,
+// post the result to the BiometricJobs endpoint.
+// Server will create/update the Biometric record and reset device to LISTENING.
+bool ApiClient::sendJobResult(String jobId, int fingerprintId) {
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Cannot send enrollment result: WiFi disconnected.");
+        Serial.println("[JobResult] WiFi disconnected.");
         return false;
     }
 
     WiFiClient client;
     HTTPClient http;
 
-    String endpoint = apiUrl + "/devices/enroll-result";
+    // POST /api/v1/biometric-jobs/:id/result
+    String endpoint = apiUrl + "/biometric-jobs/" + jobId + "/result";
     http.begin(client, endpoint);
-
     http.addHeader("Content-Type", "application/json");
     http.addHeader("x-device-uid", getMacAddress());
-    http.addHeader("x-device-secret", getDeviceSecret());
+    http.addHeader("x-device-secret", DEVICE_SECRET);
 
     String payload = "{";
-    payload += "\"userId\":\"" + userId + "\",";
-    payload += "\"fingerprintId\":" + String(fingerprintId) + ",";
-    payload += "\"sensorType\":\"" + sensorType + "\"";
+    payload += "\"success\":true,";
+    payload += "\"fingerprintId\":" + String(fingerprintId);
     payload += "}";
 
-    Serial.println("Sending enrollment result: " + payload);
-    int httpResponseCode = http.POST(payload);
+    Serial.println("[JobResult] POST → " + endpoint);
+    Serial.println("[JobResult] Payload: " + payload);
 
-    bool success = false;
-    if (httpResponseCode == 200 || httpResponseCode == 201) {
-        String response = http.getString();
-        Serial.println("Enrollment result accepted by server: " + response);
-        success = true;
+    int code = http.POST(payload);
+    bool ok  = (code == 200 || code == 201);
+
+    if (ok) {
+        Serial.println("[JobResult] Accepted by server. Job complete.");
     } else {
-        Serial.print("Enrollment result rejected, code: ");
-        Serial.println(httpResponseCode);
-        Serial.println(http.getString());
+        String body = http.getString();
+        Serial.printf("[JobResult] Rejected. HTTP %d: %s\n", code, body.c_str());
+
+        // If server returns FINGERPRINT_DUPLICATE etc, report failure too
+        // so server marks the job as FAILED
+        if (code == 400 || code == 409) {
+            WiFiClient client2;
+            HTTPClient http2;
+            http2.begin(client2, endpoint);
+            http2.addHeader("Content-Type", "application/json");
+            http2.addHeader("x-device-uid", getMacAddress());
+            http2.addHeader("x-device-secret", DEVICE_SECRET);
+
+            String failPayload = "{\"success\":false,\"error\":\"DEVICE_DUPLICATE\"}";
+            http2.POST(failPayload);
+            http2.end();
+        }
     }
 
     http.end();
-    return success;
+    return ok;
 }
 
-void ApiClient::sendEnrollmentStatus(String status, String message) {
-    if (WiFi.status() != WL_CONNECTED) return;
-
-    WiFiClient client;
-    HTTPClient http;
-
-    String endpoint = apiUrl + "/devices/heartbeat";
-    http.begin(client, endpoint);
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("x-device-uid", getMacAddress());
-    http.addHeader("x-device-secret", getDeviceSecret());
-
-    String payload = "{";
-    payload += "\"enrollmentStatus\":{";
-    payload += "\"status\":\"" + status + "\",";
-    payload += "\"message\":\"" + message + "\"";
-    payload += "}";
-    payload += "}";
-
-    http.POST(payload);
-    http.end();
-}
-
+// ─── Attendance Scan ──────────────────────────────────────────────────────────
+// Send fingerprint scan during LISTENING mode.
+// Returns raw JSON string — caller parses it.
+//
+// Server response format:
+// { "success": true,  "status": "PRESENT",
+//   "student": { "name": "Imran Hossen" },
+//   "course":  { "name": "CSE-101" },
+//   "markedAt": "09:05" }
+//
+// { "success": false, "status": "UNKNOWN_FINGER" }
+// { "success": false, "status": "NO_ACTIVE_SESSION" }
+// { "success": false, "status": "ALREADY_MARKED" }
+// { "success": false, "status": "TOO_EARLY" }
 String ApiClient::sendAttendanceScan(int fingerprintId) {
-    if (WiFi.status() != WL_CONNECTED) return "{\"success\":false,\"result\":\"WIFI_ERROR\"}";
+    if (WiFi.status() != WL_CONNECTED) {
+        return "{\"success\":false,\"status\":\"WIFI_ERROR\"}";
+    }
 
     WiFiClient client;
     HTTPClient http;
@@ -163,62 +161,28 @@ String ApiClient::sendAttendanceScan(int fingerprintId) {
     http.begin(client, endpoint);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("x-device-uid", getMacAddress());
-    http.addHeader("x-device-secret", getDeviceSecret());
+    http.addHeader("x-device-secret", DEVICE_SECRET);
 
     JsonDocument doc;
-    doc["deviceId"] = getMacAddress();
+    doc["deviceId"]     = getMacAddress();
     doc["fingerprintId"] = fingerprintId;
-    doc["eventId"] = String(millis());
 
     String payload;
     serializeJson(doc, payload);
 
-    Serial.println("[API] Sending POST to " + endpoint);
-    Serial.println("[API] Payload: " + payload);
+    Serial.println("[Scan] POST → " + endpoint);
+    Serial.println("[Scan] Payload: " + payload);
 
-    int httpResponseCode = http.POST(payload);
-    String responseBody = "{\"success\":false,\"result\":\"HTTP_ERROR\"}";
+    int code = http.POST(payload);
+    String body = "{\"success\":false,\"status\":\"HTTP_ERROR\"}";
 
-    Serial.print("[API] HTTP Response Code: ");
-    Serial.println(httpResponseCode);
-
-    if (httpResponseCode > 0) {
-        responseBody = http.getString();
+    if (code > 0) {
+        body = http.getString();
+        Serial.println("[Scan] Response (" + String(code) + "): " + body);
     } else {
-        Serial.print("Error sending attendance scan: ");
-        Serial.println(httpResponseCode);
+        Serial.printf("[Scan] Error: %d\n", code);
     }
 
     http.end();
-    return responseBody;
-}
-
-bool ApiClient::sendSyncResult(int* ids, int count) {
-    if (WiFi.status() != WL_CONNECTED) {
-        return false;
-    }
-
-    WiFiClient client;
-    HTTPClient http;
-    
-    String endpoint = apiUrl + "/devices/sync";
-    http.begin(client, endpoint);
-    
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("x-device-uid", getMacAddress());
-    http.addHeader("x-device-secret", getDeviceSecret());
-    
-    // Manual JSON construction to avoid huge memory allocs
-    String payload = "{\"fingerprintIds\":[";
-    for(int i = 0; i < count; i++) {
-        payload += String(ids[i]);
-        if (i < count - 1) payload += ",";
-    }
-    payload += "]}";
-    
-    int httpCode = http.POST(payload);
-    bool success = (httpCode == 200 || httpCode == 201);
-    
-    http.end();
-    return success;
+    return body;
 }

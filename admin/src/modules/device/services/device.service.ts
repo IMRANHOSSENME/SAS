@@ -7,9 +7,11 @@ export interface DeviceData {
   deviceUid: string;
   location?: string;
   status: 'ACTIVE' | 'PENDING' | 'DISABLED';
+  mode: 'LISTENING' | 'ENROLL' | 'UPDATE';
   lastSeen?: string;
   firmwareVersion?: string;
   activeSensors?: string[];
+  modeOperationId?: string;
 }
 
 export const deviceApi = {
@@ -20,9 +22,14 @@ export const deviceApi = {
     }
     return response.data;
   },
-  
+
   getOne: async (id: string): Promise<ApiResponse<DeviceData>> => {
     const response = await apiClient.get(`/devices/${id}`);
+    return response.data;
+  },
+
+  create: async (data: { name: string; deviceUid: string; location?: string }): Promise<ApiResponse<DeviceData>> => {
+    const response = await apiClient.post('/devices', data);
     return response.data;
   },
 
@@ -46,13 +53,13 @@ export const deviceApi = {
     return response.data;
   },
 
-  enroll: async (id: string, userId: string, type: string): Promise<ApiResponse<any>> => {
-    const response = await apiClient.post(`/devices/${id}/enroll`, { userId, type });
+  getStatus: async (id: string): Promise<{ status: string; mode: string; lastSeen: string }> => {
+    const response = await apiClient.get(`/devices/${id}/status`);
     return response.data;
   },
 
-  getEnrollmentStatus: async (id: string): Promise<{ status: string; message: string; updatedAt: string }> => {
-    const response = await apiClient.get(`/devices/${id}/enrollment-status`);
+  getEvents: async (id: string): Promise<ApiResponse<any[]>> => {
+    const response = await apiClient.get(`/devices/${id}/events`);
     return response.data;
   },
 };
