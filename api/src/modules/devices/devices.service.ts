@@ -15,45 +15,6 @@ export class DevicesService {
     @InjectRepository(Biometric) private biometricRepository: Repository<Biometric>,
   ) {}
 
-  // In-memory store for pending tasks per device
-  private pendingDeviceTasks = new Map<string, any[]>();
-
-  // In-memory store for live enrollment status per device
-  // status: 'IDLE' | 'WAITING_FINGER_1' | 'FINGER_1_OK' | 'WAITING_FINGER_2' | 'PROCESSING' | 'SUCCESS' | 'FAILED'
-  private enrollmentStatusMap = new Map<string, { status: string; message: string; updatedAt: Date }>();
-
-  // In-memory store for last synced sensor fingerprint IDs
-  private deviceSensorIdsMap = new Map<string, number[]>();
-
-  updateEnrollmentStatus(deviceId: string, status: string, message: string) {
-    this.enrollmentStatusMap.set(deviceId, { status, message, updatedAt: new Date() });
-    console.log(`[EnrollStatus] Device ${deviceId}: ${status} — ${message}`);
-  }
-
-  getEnrollmentStatus(deviceId: string) {
-    return this.enrollmentStatusMap.get(deviceId) ?? { status: 'IDLE', message: '', updatedAt: new Date() };
-  }
-
-  async setEnrollmentTask(deviceId: string, userId: string, type: string) {
-    const tasks = this.pendingDeviceTasks.get(deviceId) || [];
-    tasks.push({ action: 'ENROLL', userId, sensorType: type });
-    this.pendingDeviceTasks.set(deviceId, tasks);
-    return { message: 'Enrollment task queued' };
-  }
-
-  async setDeleteTask(deviceId: string, fingerprintId: number) {
-    const tasks = this.pendingDeviceTasks.get(deviceId) || [];
-    tasks.push({ action: 'DELETE', fingerprintId });
-    this.pendingDeviceTasks.set(deviceId, tasks);
-    return { message: 'Delete task queued' };
-  }
-
-  async setSyncTask(deviceId: string) {
-    const tasks = this.pendingDeviceTasks.get(deviceId) || [];
-    tasks.push({ action: 'SYNC' });
-    this.pendingDeviceTasks.set(deviceId, tasks);
-    return { message: 'Sync task queued' };
-  }
 
   async create(createDeviceDto: CreateDeviceDto) {
     const existing = await this.deviceRepository.findOne({ where: { deviceUid: createDeviceDto.deviceUid } });
@@ -116,9 +77,18 @@ export class DevicesService {
     const device = await this.findOne(id);
     return {
       status: device.status,
+      mode: device.mode,
       lastSeen: device.lastSeen,
       firmwareVersion: device.firmwareVersion,
     };
+  }
+
+  async setMode(id: string, mode: string, operationId?: string) {
+    const device = await this.findOne(id);
+    device.mode = mode;
+    if (operationId) device.modeOperationId = operationId;
+    device.modeChangedAt = new Date();
+    return this.deviceRepository.save(device);
   }
 
   async getEvents(id: string) {
@@ -181,100 +151,13 @@ export class DevicesService {
       ipAddress: payload.ipAddress,
     });
     await this.heartbeatRepository.save(heartbeat);
-
-    // Handle live enrollment status updates from device
-    // Device sends: { enrollmentStatus: { status: 'WAITING_FINGER_1', message: 'Place Finger...' } }
-    if (payload.enrollmentStatus) {
-      this.updateEnrollmentStatus(device.id, payload.enrollmentStatus.status, payload.enrollmentStatus.message);
-    }
-
-    // Handle enrollment result sent by device after scanning finger
-    if (payload.enrollmentResult) {
-      const result = payload.enrollmentResult;
-      console.log(`[Enrollment Result] Device ${device.deviceUid} sent result:`, result);
-      await this.processEnrollmentResult(device.id, result.userId, result.fingerprintId, result.sensorType);
-      this.updateEnrollmentStatus(device.id, 'SUCCESS', 'Fingerprint enrolled!');
-    }
-
-    // Check if there are pending tasks for this device
-    const tasks = this.pendingDeviceTasks.get(device.id);
-    if (tasks && tasks.length > 0) {
-      // Pop the oldest task
-      const nextTask = tasks.shift();
-      if (tasks.length === 0) {
-        this.pendingDeviceTasks.delete(device.id);
-      } else {
-        this.pendingDeviceTasks.set(device.id, tasks);
+    return { 
+      success: true,
+      pendingCommand: {
+        type: 'CHANGE_MODE',
+        mode: device.mode,
+        operationId: device.modeOperationId
       }
-      
-      return { 
-        success: true, 
-        deviceTask: nextTask
-      };
-    }
-
-    return { success: true };
-  }
-
-  /**
-   * Called when a hardware device reports a successful enrollment.
-   * Saves the fingerprintId to the pending biometric record and marks it ACTIVE.
-   */
-  async processEnrollmentResult(
-    deviceId: string,
-    userId: string,
-    fingerprintId: number,
-    sensorType?: string,
-  ) {
-    console.log(`[Enrollment Result] Processing: device=${deviceId}, user=${userId}, fingerprintId=${fingerprintId}`);
-
-    // Check for duplicate fingerprintId on this device
-    const duplicate = await this.biometricRepository.findOne({
-      where: { deviceId, fingerprintId, status: 'ACTIVE' },
-    });
-
-    if (duplicate && duplicate.userId !== userId) {
-      console.warn(`[Enrollment Result] Duplicate fingerprint detected! fingerprintId=${fingerprintId} already belongs to userId=${duplicate.userId}`);
-      // Mark the pending record as failed by deleting it
-      const pendingBio = await this.biometricRepository.findOne({
-        where: { deviceId, userId, status: 'PENDING' },
-      });
-      if (pendingBio) await this.biometricRepository.remove(pendingBio);
-      return { success: false, reason: 'DUPLICATE_FINGERPRINT' };
-    }
-
-    // Find the pending biometric record for this user on this device
-    const biometric = await this.biometricRepository.findOne({
-      where: { deviceId, userId, status: 'PENDING' },
-    });
-
-    if (!biometric) {
-      // No pending record — create one fresh (device-initiated enrollment)
-      console.log(`[Enrollment Result] No pending record found, creating new one.`);
-      const newBio = this.biometricRepository.create({
-        userId,
-        deviceId,
-        fingerprintId,
-        status: 'ACTIVE',
-      });
-      await this.biometricRepository.save(newBio);
-      return { success: true };
-    }
-
-    biometric.fingerprintId = fingerprintId;
-    biometric.status = 'ACTIVE';
-    await this.biometricRepository.save(biometric);
-    console.log(`[Enrollment Result] Successfully enrolled biometric id=${biometric.id} for userId=${userId}`);
-    return { success: true };
-  }
-
-  async processSyncData(deviceId: string, fingerprintIds: number[]) {
-    console.log(`[Sync Data] Device ${deviceId} synced ${fingerprintIds?.length} fingerprints.`);
-    this.deviceSensorIdsMap.set(deviceId, fingerprintIds || []);
-    return { success: true };
-  }
-
-  getSensorFingerprints(deviceId: string): number[] {
-    return this.deviceSensorIdsMap.get(deviceId) || [];
+    };
   }
 }

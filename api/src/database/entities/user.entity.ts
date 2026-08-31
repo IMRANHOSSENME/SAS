@@ -1,6 +1,8 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany, ManyToOne } from 'typeorm';
 import { Biometric } from './biometric.entity';
 import { Attendance } from './attendance.entity';
+import { Section } from './section.entity';
+import { Enrollment } from './enrollment.entity';
 
 @Entity('users')
 export class User {
@@ -39,4 +41,10 @@ export class User {
 
   @OneToMany(() => Attendance, attendance => attendance.user)
   attendances: Attendance[];
+
+  @ManyToOne(() => Section, section => section.students, { nullable: true })
+  section: Section;
+
+  @OneToMany(() => Enrollment, enrollment => enrollment.student)
+  enrollments: Enrollment[];
 }

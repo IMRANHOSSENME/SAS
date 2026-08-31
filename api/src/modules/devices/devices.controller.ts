@@ -55,17 +55,13 @@ export class DevicesController {
     return this.devicesService.disable(id);
   }
 
-  @ApiOperation({ summary: 'Trigger biometric enrollment on device' })
-  @Post(':id/enroll')
-  enroll(@Param('id') id: string, @Body() body: { userId: string, type: string }) {
-    return this.devicesService.setEnrollmentTask(id, body.userId, body.type);
+
+  @ApiOperation({ summary: 'Set device mode manually' })
+  @Post(':id/mode')
+  setMode(@Param('id') id: string, @Body() body: { mode: string, operationId?: string }) {
+    return this.devicesService.setMode(id, body.mode, body.operationId);
   }
 
-  @ApiOperation({ summary: 'Trigger sensor sync on device' })
-  @Post(':id/sync')
-  triggerSync(@Param('id') id: string) {
-    return this.devicesService.setSyncTask(id);
-  }
 
   @ApiOperation({ summary: 'Get device status' })
   @Get(':id/status')
@@ -79,11 +75,6 @@ export class DevicesController {
     return this.devicesService.getEvents(id);
   }
 
-  @ApiOperation({ summary: 'Get live enrollment status for a device' })
-  @Get(':id/enrollment-status')
-  getEnrollmentStatus(@Param('id') id: string) {
-    return this.devicesService.getEnrollmentStatus(id);
-  }
 
   @Public()
   @UseGuards(DeviceAuthGuard)
@@ -98,29 +89,5 @@ export class DevicesController {
     const result = await this.devicesService.processHeartbeat(device.id, payload);
     // Return the full result so the device gets the enrollmentTask if pending
     return result;
-  }
-
-  @Public()
-  @UseGuards(DeviceAuthGuard)
-  @ApiOperation({ summary: 'Submit enrollment result from device after fingerprint scan' })
-  @Post('enroll-result')
-  async enrollResult(@Request() req: any, @Body() body: { userId: string; fingerprintId: number; sensorType?: string }) {
-    const device = req.device;
-    console.log(`[/devices/enroll-result] Received from device ${device.deviceUid}:`, body);
-    return this.devicesService.processEnrollmentResult(
-      device.id,
-      body.userId,
-      body.fingerprintId,
-      body.sensorType,
-    );
-  }
-
-  @Public()
-  @UseGuards(DeviceAuthGuard)
-  @ApiOperation({ summary: 'Submit sensor fingerprint sync data' })
-  @Post('sync')
-  async syncDeviceFingerprints(@Request() req: any, @Body() body: { fingerprintIds: number[] }) {
-    const device = req.device;
-    return this.devicesService.processSyncData(device.id, body.fingerprintIds);
   }
 }

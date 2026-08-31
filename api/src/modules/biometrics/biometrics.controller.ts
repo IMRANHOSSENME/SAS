@@ -11,18 +11,6 @@ import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 export class BiometricsController {
   constructor(private readonly biometricsService: BiometricsService) {}
 
-  @ApiOperation({ summary: 'Start enrollment process' })
-  @Post('enroll')
-  enroll(@Body() enrollDto: EnrollDto) {
-    return this.biometricsService.enroll(enrollDto);
-  }
-
-  @ApiOperation({ summary: 'Complete enrollment' })
-  @Post('enroll/:id/complete')
-  completeEnroll(@Param('id') id: string, @Body() completeDto: CompleteEnrollDto) {
-    return this.biometricsService.completeEnroll(id, completeDto);
-  }
-
   @ApiOperation({ summary: 'Get all biometrics' })
   @Get()
   findAll() {
@@ -41,15 +29,4 @@ export class BiometricsController {
     return this.biometricsService.remove(id);
   }
 
-  @ApiOperation({ summary: 'Get orphan fingerprints for device' })
-  @Get('orphans/:deviceId')
-  getOrphans(@Param('deviceId') deviceId: string) {
-    return this.biometricsService.getOrphans(deviceId);
-  }
-
-  @ApiOperation({ summary: 'Remove orphan fingerprint from sensor' })
-  @Delete('orphans/:deviceId/:fingerprintId')
-  removeOrphan(@Param('deviceId') deviceId: string, @Param('fingerprintId') fingerprintId: number) {
-    return this.biometricsService.removeOrphan(deviceId, fingerprintId);
-  }
 }

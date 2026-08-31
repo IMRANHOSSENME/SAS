@@ -27,6 +27,18 @@ export class Device {
   @Column({ default: 'PENDING' }) // PENDING | ACTIVE | DISABLED | OFFLINE
   status: string;
 
+  @Column({ default: 'LISTENING' }) // LISTENING | ENROLL | UPDATE
+  mode: string;
+
+  @Column({ type: 'datetime', nullable: true })
+  modeChangedAt: Date;
+
+  @Column({ nullable: true })
+  modeChangedBy: string;
+
+  @Column({ nullable: true })
+  modeOperationId: string;
+
   @Column('simple-json', { nullable: true })
   activeSensors: string[];
 

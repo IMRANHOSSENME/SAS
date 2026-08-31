@@ -8,6 +8,7 @@ import { Event } from '../../database/entities/event.entity';
 import { AttendanceSession } from '../../database/entities/attendancesession.entity';
 import { ScanDto } from './dto/attendance.dto';
 import { format } from 'date-fns';
+import { AttendanceCorrection } from '../../database/entities/attendance-correction.entity';
 
 @Injectable()
 export class AttendanceService {
@@ -17,84 +18,84 @@ export class AttendanceService {
     @InjectRepository(Device) private deviceRepository: Repository<Device>,
     @InjectRepository(Event) private eventRepository: Repository<Event>,
     @InjectRepository(AttendanceSession) private sessionRepository: Repository<AttendanceSession>,
+    @InjectRepository(AttendanceCorrection) private correctionRepo: Repository<AttendanceCorrection>,
   ) {}
 
   async processScan(scanDto: ScanDto) {
     const device = await this.deviceRepository.findOne({ where: { deviceUid: scanDto.deviceId } });
-    if (!device) throw new NotFoundException('Device not found');
+    if (!device) return { success: false, status: 'UNKNOWN_DEVICE' };
 
+    // 1. Lookup Biometric
     const biometric = await this.biometricRepository.findOne({ 
       where: { deviceId: device.id, fingerprintId: scanDto.fingerprintId, status: 'ACTIVE' },
-      relations: { user: true } 
-    });
-
-    // Log the event
-    await this.eventRepository.save({
-      deviceId: device.id,
-      fingerprintId: scanDto.fingerprintId,
-      eventType: 'FINGERPRINT_SCAN',
-      result: biometric ? 'SUCCESS' : 'NOT_FOUND',
-      metadata: { eventId: scanDto.eventId }
+      relations: { user: { enrollments: { course: true } } } 
     });
 
     if (!biometric) {
-      return { success: false, result: 'NOT_FOUND' };
+      return { success: false, status: 'UNKNOWN_FINGER' };
+    }
+
+    // 2. Check device mode
+    if (device.mode !== 'LISTENING') {
+      return { success: false, status: 'DEVICE_NOT_IN_LISTENING_MODE' };
     }
 
     const today = format(new Date(), 'yyyy-MM-dd');
-    const currentTime = format(new Date(), 'HH:mm:ss');
+    const scannedAt = new Date();
 
-    // Check for duplicate scan today
-    let attendance = await this.attendanceRepository.findOne({
-      where: { userId: biometric.user.id, attendanceDate: today }
-    });
+    // 3. Find open session for user's courses
+    const userCourseIds = biometric.user.enrollments?.map(e => e.course?.id).filter(id => id) || [];
+    
+    // We need to query sessions for these courses
+    const sessions = await this.sessionRepository.createQueryBuilder('session')
+      .leftJoinAndSelect('session.schedule', 'schedule')
+      .leftJoinAndSelect('schedule.course', 'course')
+      .where('session.sessionDate = :today', { today })
+      .andWhere('session.status = :status', { status: 'OPEN' })
+      .getMany();
 
-    if (attendance) {
-      // If already checked in, maybe mark check-out
-      if (!attendance.checkOut) {
-        // Prevent accidental double scan within 5 minutes (300000 ms)
-        const checkInTime = new Date(`${today}T${attendance.checkIn}`);
-        const now = new Date();
-        if (now.getTime() - checkInTime.getTime() > 300000) {
-          attendance.checkOut = currentTime;
-          await this.attendanceRepository.save(attendance);
-          return { success: true, result: 'CHECK_OUT', user: biometric.user, attendance };
-        }
-        return { success: false, result: 'DUPLICATE_SCAN' };
-      }
-      return { success: false, result: 'ALREADY_COMPLETED' };
+    const activeSession = sessions.find(s => s.schedule?.course && userCourseIds.includes(s.schedule.course.id));
+
+    if (!activeSession) {
+      return { success: false, status: 'NO_ACTIVE_SESSION' };
     }
 
-    // Get active session for today
-    const activeSession = await this.sessionRepository.findOne({
-      where: { status: 'ACTIVE' },
-      order: { createdAt: 'DESC' }
+    // 4. Check double mark
+    const existingAttendance = await this.attendanceRepository.findOne({
+      where: { sessionId: activeSession.id, userId: biometric.user.id }
     });
 
-    let status = 'PRESENT';
-    let sessionId: string | undefined = undefined;
-
-    if (activeSession && activeSession.startTime) {
-      sessionId = activeSession.id;
-      // Calculate late status
-      const [startHours, startMinutes] = activeSession.startTime.split(':').map(Number);
-      const graceMinutes = activeSession.lateGraceMinutes || 15;
-      
-      const sessionStartMin = startHours * 60 + startMinutes;
-      const currentMin = new Date().getHours() * 60 + new Date().getMinutes();
-      
-      if (currentMin > (sessionStartMin + graceMinutes)) {
-        status = 'LATE';
-      }
+    if (existingAttendance) {
+      return { 
+        success: false, 
+        status: 'ALREADY_MARKED',
+        student: { name: biometric.user.fullName } 
+      };
     }
 
-    attendance = this.attendanceRepository.create({
+    // 5. Time resolution
+    let finalStatus = 'PRESENT';
+    if (scannedAt < activeSession.opensAt) {
+      finalStatus = 'TOO_EARLY';
+    } else if (scannedAt >= activeSession.closesAt) {
+      finalStatus = 'CLOSED';
+    } else if (scannedAt >= activeSession.lateAt) {
+      finalStatus = 'LATE';
+    }
+
+    if (finalStatus === 'TOO_EARLY' || finalStatus === 'CLOSED') {
+      return { success: false, status: finalStatus };
+    }
+
+    // 6. Create Record
+    const attendance = this.attendanceRepository.create({
       userId: biometric.user.id,
       deviceId: device.id,
-      sessionId: sessionId,
+      sessionId: activeSession.id,
+      biometricId: biometric.id,
       attendanceDate: today,
-      checkIn: currentTime,
-      status: status,
+      checkIn: format(scannedAt, 'HH:mm:ss'),
+      status: finalStatus,
       method: 'FINGERPRINT'
     });
 
@@ -102,9 +103,10 @@ export class AttendanceService {
 
     return { 
       success: true, 
-      result: 'CHECK_IN', 
-      user: { id: biometric.user.id, name: biometric.user.fullName }, 
-      attendance 
+      status: finalStatus,
+      student: { name: biometric.user.fullName },
+      course: { name: activeSession.schedule?.course?.name },
+      markedAt: format(scannedAt, 'HH:mm')
     };
   }
 
@@ -135,29 +137,14 @@ export class AttendanceService {
     return attendance;
   }
 
-  async getActiveSession() {
-    return this.sessionRepository.findOne({
-      where: { status: 'ACTIVE' },
-      order: { createdAt: 'DESC' }
-    });
+  async getSessions() {
+    return this.sessionRepository.find({ order: { sessionDate: 'DESC', createdAt: 'DESC' } });
   }
 
-  async createOrUpdateSession(sessionData: any) {
-    let session = await this.getActiveSession();
-    if (!session) {
-      session = this.sessionRepository.create({
-        name: sessionData.name || 'Default Session',
-        startTime: sessionData.startTime || '09:00',
-        endTime: sessionData.endTime || '17:00',
-        lateGraceMinutes: sessionData.lateGraceMinutes || 15,
-        status: 'ACTIVE'
-      });
-    } else {
-      if (sessionData.name) session.name = sessionData.name;
-      if (sessionData.startTime) session.startTime = sessionData.startTime;
-      if (sessionData.endTime) session.endTime = sessionData.endTime;
-      if (sessionData.lateGraceMinutes !== undefined) session.lateGraceMinutes = sessionData.lateGraceMinutes;
-    }
+  async updateSessionStatus(id: string, status: string) {
+    const session = await this.sessionRepository.findOne({ where: { id } });
+    if (!session) throw new NotFoundException('Session not found');
+    session.status = status;
     return this.sessionRepository.save(session);
   }
 
@@ -178,6 +165,34 @@ export class AttendanceService {
     const present = attendances.filter(a => a.status === 'PRESENT').length;
     const late = attendances.filter(a => a.status === 'LATE').length;
     return { present, late, totalScans: attendances.length };
+  }
+
+  async correctAttendance(id: string, newStatus: string, reason: string, adminId: string) {
+    const attendance = await this.attendanceRepository.findOne({ where: { id } });
+    if (!attendance) throw new NotFoundException('Attendance not found');
+
+    const oldStatus = attendance.status;
+    attendance.status = newStatus;
+    attendance.method = 'MANUAL_OVERRIDE';
+    await this.attendanceRepository.save(attendance);
+
+    const correction = this.correctionRepo.create({
+      attendanceId: id,
+      oldStatus,
+      newStatus,
+      reason,
+      changedBy: adminId
+    });
+    await this.correctionRepo.save(correction);
+
+    return attendance;
+  }
+
+  async getCorrections(attendanceId: string) {
+    return this.correctionRepo.find({
+      where: { attendanceId },
+      order: { createdAt: 'DESC' }
+    });
   }
 }
 

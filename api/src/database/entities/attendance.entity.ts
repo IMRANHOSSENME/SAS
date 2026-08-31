@@ -1,9 +1,11 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn, Unique } from 'typeorm';
 import { User } from './user.entity';
 import { Device } from './device.entity';
 import { AttendanceSession } from './attendancesession.entity';
+import { Biometric } from './biometric.entity';
 
 @Entity('attendance')
+@Unique(['sessionId', 'userId'])
 export class Attendance {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -16,6 +18,9 @@ export class Attendance {
 
   @Column({ nullable: true })
   sessionId: string;
+
+  @Column({ nullable: true })
+  biometricId: string;
 
   @Column({ type: 'date' })
   attendanceDate: string;
@@ -49,4 +54,8 @@ export class Attendance {
   @ManyToOne(() => AttendanceSession, session => session.attendances, { nullable: true })
   @JoinColumn({ name: 'sessionId' })
   session: AttendanceSession;
+
+  @ManyToOne(() => Biometric, { nullable: true })
+  @JoinColumn({ name: 'biometricId' })
+  biometric: Biometric;
 }
